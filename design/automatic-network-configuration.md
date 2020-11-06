@@ -32,9 +32,9 @@ able to reconfigure related network devices using a similar API.
 
 ### Non-Goals
 
-* implement a network controller, this is aimed at being an integration
+* Implement a network controller which is aimed at being an integration
   with an existing controller only.
-* implement a solution for a specific underlying infrastructure.
+* Implement a solution for a specific underlying infrastructure.
 
 ## Proposal
 
@@ -51,8 +51,8 @@ NetworkConfiguration operator to perform network configuration.
 #### Story 1
 
 As a consumer of Metal³, when adding a machine resource to the cluster,
-according to the network configuration of the cluster, the corresponding
-BMH is automatically configured to the corresponding network.
+according to the network configuration of the cluster, the physical host
+is connected to the corresponding logical layer-2 network segment.
 
 #### Story 2
 
@@ -100,38 +100,11 @@ type DeviceManager interface {
     // ConfigureNetwork() for basic network configuration and ACL configuration
     ConfigureNetwork()
     DeConfigureNetwork()
-    // The ConfigureLinkAggreation method corresponding to the switch
-    // type device adds the processing of the MLAG situation.
-    ConfigureLinkAggreation()
-    DeConfigureLinkAggreation()
-    CheckNetwork()
-    HealthCheck()
 }
 ```
 
 Each type of network device must have its own CRD and implements corresponding
 `DeviceManager` interface.
-
-#### Port
-
-Abstract the ports of various types of devices.
-
-```go
-// PortManager is used to control the `Port`
-type PortManager interface {
-    // Perform network configuration on the port
-    Configure()
-     // Cancel the network configuration on the port
-    DeConfigure()
-}
-```
-
-Each type of port must have its own CRD and implements corresponding
-`PortManager` interface.
-
-#### PortLink
-
-Represents the connection relationship between two ports.
 
 #### NetworkConfiguration
 
@@ -139,103 +112,99 @@ Indicates specific network configuration information.
 
 #### NetworkBinding
 
-Indicates the correspondence between PortLink and NetworkConfiguration,
-which means that this NetworkConfiguration is applied to this PortLink.
-Only one NetworkConfiguration can be applied to a PortLink, and one
-NetworkConfiguration can be applied to multiple PortLinks.
+Indicates the correspondence between network interface and NetworkConfiguration,
+which means that this NetworkConfiguration is applied to this interface.
+An interface can only have one NetworkConfiguration applied to, and one
+NetworkConfiguration can be applied to multiple interfaces.
+
+#### Match()
+
+The Match() method obtains the `NetworkConfiguration` CR according to the input
+`NetworkConfigurationRef`, and checks if the input `Port`s can satisfy the
+requirements of all the `NetworkConfiguration`. If true, Match() will build a
+`NetworkBinding` struct for each `NetworkConfiguration` and return the slice of the
+created `NetworkBinding`s. If false, Match() will return nil and error. The
+`Port` used here represents a network interface, for bare metal, it is a NIC.
+
+```go
+// Build NetworkBinding CR
+func Match(client runtime.Client, refs []NetworkConfigurationRef, ports []Port)
+                                     ([]*v1alpha1.NetworkBinding, error) {
+}
+
+```
+
+```go
+type NetworkConfigurationRef struct {
+    name      string
+    namespace string
+}
+```
+
+```go
+// Port contains the information of its own capabilities, connected network device
+// and specific port number of the device.
+type Port struct {
+    ConPortID    uint
+    ConDeviceRef struct {
+        Name      string
+        Namespace string
+        Kind      string
+    }
+    Capability struct {
+        Speed uint
+        SmartNic bool
+    }
+}
+```
+
+![design compose](images/automatic_network_configuration_design_compose.png)
 
 ### workflow
 
-#### networkConfiguration operator workflow
-
-Initialization:
-
-* The administrator performs all physical connections and basic network
-  device initialization (including the creation of peer links between switches).
-* The administrator creates Device, Port specific resources and PortLink CR
-  according to the connection situation
-  * Device can be Switch CR or BMH CR
-  * The Port may specifically be the SwitchPort CR corresponding to the
-    switch or the NIC CR corresponding to the BMH, and each CR includes
-    the Ref of the PortLink CR to which the CR belongs.
-  * User creates NetworkConfiguration CR, NetworkConfiguration Controller
-    adds finalizer to CR.
-
-Configure Network:
-
-* A role (such as CAPM3) can specify the NetworkConfiguration CR to be
-  applied to a PortLink CR by creating a NetworkBinding CR.
-* When the NetworkBinding controller detects that a new NetworkBinding CR
-  is created, it finds the two specific Port CRs connected by the portLink,
-  and then configures the port's network. After the configuration is successful,
-  the corresponding `status.state` in the NetworkBinding CR is set to ‘complete’.
-* The NetworkBinding controller adds the metaData information of
-  the networkBinding CR to the `status.NetworkBindings` field of
-  the NetworkConfiguration CR.
-
-Modify NetworkConfiguration:
-
-* User modify NetworkConfiguration CR
-* After the NetworkConfiguration controller monitors the changes in the
-  NetworkConfiguration CR, it finds all the networkBinding CRs according
-  to status.networkBindings, and processes each networkBinding CR one by
-  one: first delete the corresponding NetworkBinding CR, check that the
-  NetworkConfiguration CR is successfully deleted, and then create a new
-  NetworkConfiguration CR.
-
-Delete NetworkConfiguration:
-
-* When deleting the NetworkConfiguration CR, the NetworkConfiguration Controller
-  determines whether the status.portLinks is empty, and if it is empty, it deletes
-  the finalizer from the NetworkConfiguration CR. That is, when the
-  NetworkConfiguration CR is used, it cannot be deleted.
-
-#### CAPM3 uses the networkConfiguration operator to configure the network workflow
-
 Create CR related to BMH's network:
 
-* Administrator creates BMH CR.
-* Administrator creates a corresponding Port type CR for the port of
-  each device (BMH and network device) that needs to be configured to
-  connect to the network cable.
-* Administrator creates a PortLink CR based on the actual network cable
-  connection information, and writes its ref into each Port type CR.
-* The administrator adds the information corresponding to the NIC CR
-  in the BMH CR.
+* Administrator creates the corresponding `Device` CR according to the
+  specific network device.
+* Administrator creates a `BareMetalHost` CR and fills in the content in `bmh.spec.ports`
+  according to the actual network connection.
 
 Create Metal3Machine:
 
-* User creates NetworkConfiguration CR.
-* User specifies the NetworkConfiguration CR used when creating Metal3Machine CR.
+* User creates `NetworkConfiguration` CR.
+* User specifies the `NetworkConfiguration` CR used when creating `Metal3Machine`
+  CR.
 * CAPM3 selects a group of BMHs according to the original logic.
   If the `networkConfiguration` field of Metal3Machine is not empty,
-  call the match() method, select and filter the BMH suitable for the network
+  call the `filter()` method, select and filter the BMH suitable for the network
   configuration from the currently available BMHs, and then select one BMH
   according to the original method.
 * Before provisioning, if the machine's network configuration field is not empty,
-  CAPM3 calls the configuration() method. In this method, CAPM3 triggers the
-  NetworkBinding Controller to configure the BareMetal network by creating a
-  NetworkBinding CR. In addition, CAPM3 also needs to add the information of
-  the Metal3Machine to the metaData.OwnerReferences of the NetworkBinding CR
-  to ensure that when the Metal3Machine is deleted, the NetworkBinding is also
-  will be deleted, which triggers the NetworkBinding Controller to delete the
-  network configuration corresponding to BareMetal.
+  CAPM3 calls the `configureNetwork()` method. In this method, CAPM3 triggers the
+  NetworkBinding Controller to configure the BareMetal network by creating
+  NetworkBinding CRs. In addition, CAPM3 also needs to add the `Metal3Machine` to
+  the `.metaData.OwnerReferences` of the `NetworkBinding` CR to ensure that when
+  the `Metal3Machine` is deleted, the corresponding `NetworkBinding` CR will also
+  get deleted, which triggers the NetworkBinding Controller to clear the network
+  configuration corresponding to BareMetal.
 * NetworkBinding controller starts to configure the network.
-* Configuration() method polls the status.state field of the NetworkBinding CR
-  to determine the result of the network configuration and returns the result.
+* `configureNetwork()` method polls the `status.state` field of the
+  `NetworkBinding` CR to determine the result of the network configuration.
 * After the network configuration is successful, CAPM3 continues to provision BMH.
 
 Remove Metal3Machine:
 
-* User deletes the Metal3Machine CR. Since the OwnerReferences of the
-  NetworkBinding CR is the Metal3Machine CR, k8s will also delete the
-  NetworkBinding CR.
-* NetworkBinding Controller detects that the NetworkBinding CR needs to be
+* User deletes the `Metal3Machine` CR. Since the OwnerReferences of the
+  `NetworkBinding` CR is the `Metal3Machine` CR, k8s will also delete the
+  `NetworkBinding` CR.
+* The NetworkBinding Controller detects that the `NetworkBinding` CR needs to be
   deleted and starts to clear the network configuration.
-* CAPM3 calls the Deconfigure() method to detect whether the NetworkBinding CR
-  has been deleted, and returns the result.
+* CAPM3 calls the `deconfigureNetwork()` method to detect whether the
+  `NetworkBinding` CR has been deleted, and returns the result.
 * If the network configuration is deleted successfully, continue to
   deprovision the BMH.
+
+![timing diagram](images/automatic_network_configuration_timing_diagram.png)
 
 ### Changes to Current API
 
@@ -243,50 +212,52 @@ Remove Metal3Machine:
 
 ```yaml
 spec:
-    # Specify the network configuration that metal3Machine needs to use
-  networkConfiguration:
-    - name: "nc1"
-      namespace: "def"
+  # Specify the network configuration that metal3Machine needs to use
+  networkConfigurationRef:
+  - name: nc1
+    namespace: default
 ```
 
 #### BareMetalHost
 
-Add the NIC CR corresponding to each network card in BMH.
+Add the `ports` field to `.spec` to indicate the connection information
+and performance of all network cards in the `BareMetalHost`.
 
-```yaml
-metaData:
-  name: "bm1"
+``` yaml
 spec:
-  nics:
-    - name: "bm1-eth0"
-      namespace: "def"
-    - name: "bm1-eth1"
-      namespace: "def"
+  ports:
+    - conPortID: 10
+      conDeviceRef:
+        name: switch0
+        kind: Switch
+        namespace: abc
+      capability:
+        speed: 1000
+        smartNic: false
+   - conPortID:
+   ......
 ```
 
 #### CAPM3
 
 Add the following methods in `metal3machine_manager.go`:
 
-* match()
+* `filter()`
 
-  Find out the BMH that meets the network configuration requirements according
-  to NetworkConfiguration CR. If the `linkAggregation` field is true, select two
-  network cards on the same switch (LAG) or different switches (MLAG) to configure
-  link aggregation according to the value of the `linkAggregationType` field.
+  Filter out the BMHs that cannot meet the network configuration requirements
+  from a list of BMHs (by calling the `Match()` function in the
+  NetworkConfiguration operator).
+  This `filter()` method will be used in the current `chooseHost()` method to
+  let `MachineManager` choose a `BMH` that meets the network requirements.
 
-* configuration()
+* `configureNetwork()`
 
-  Match the network cards one by one according to the NetworkConfiguration CR.
-  If linkAggregation is 0, after selecting a suitable network card, directly
-  create the corresponding NetworkBinding CR and exit. If linkAggregation is
-  greater than 1, find the portLink CR of the corresponding number of network
-  cards and fill them in the portLinks field of the newly created
-  NetworkBinding CR.
+  Create all the needed `NetworkBinding` CRs to trigger the network configuration
+  operation and check if the configuration is completed or not.
 
-* deconfigure()
+* `deconfigureNetwork()`
 
-  Monitor the processing result after the NetworkBinding CR is deleted and return.
+  Monitor the processing result after the `NetworkBinding` CR is deleted and return.
 
 ### Add new CRD and controller
 
@@ -301,13 +272,14 @@ Add the following methods in `metal3machine_manager.go`:
 ```yaml
 metaData:
   name: nc1
-  finalizers: [m3m1]
+  finalizers:
+  - m3m1
 spec:
-  vlans:
+  VLANs:
     - id:
     - id:
-  # The untagged VLAN ID
-  vlanId:
+  untaggedVLAN:
+  trunk:
   # Indicates whether link aggregation is required. If the value is true,
   # select two ports for link aggregation.
   linkAggregation: false
@@ -325,143 +297,147 @@ spec:
       des: # xxx.xxx.xxx.xxx/xx
       desPortRange: # 22, 22-30
 status:
-  networkBinding:
+  networkBindingRefs:
     - name:
       namespace:
     - name:
       namespace:
 ```
 
-#### PortLink CRD
+#### NetworkConfiguration Controller
 
-Indicates the connection information of the two device ports.
+* User creates `NetworkConfiguration` CR
+  * The NetworkConfiguration Controller detects whether the data entered by the
+    user is legal, and adds `finalizers`.
 
-```yaml
-apiVersion:
-kind: PortLink
-metaData:
-  name: pl1
-  namespace:
-spec:
-  ports:
-    - name: bm0-eth0
-      kind: NICPort
-      namespace: def
-    - name: switch0-port0
-      kind: SwitchPort
-      namespace: def
-```
+* User deletes `NetworkConfiguration` CR
+  * The NetworkConfiguration Controller detects whether the length of
+    `.status.networkBindingRefs` is 0, if it is not 0, it is not allowed to
+    delete the CR, otherwise the Controller deletes the `finalizers` and deletes
+    the CR.
+
+* User modify `NetworkConfiguration` CR
+  * The NetworkConfiguration Controller deletes all the old `NetworkBinding` CRs
+    and creates a new one for each deleted `NetworkBinding` CR according to the
+    contents in `.status.networkBindingRefs`.
 
 #### NetworkBinding CRD
 
+`NetworkBinding` CR indicates a networkConfiguration is applied to some ports.
+When this CR is created, the operation of configuring network will be triggered,
+and when this CR is deleted, the operation of clearing network configuration will
+be triggered.
+This CR cannot be modified. If user wants to change the network configuration
+applied on a port, it is needed to clear the configuration first and then apply
+new configuration. So modification is done by deleting old `NetworkBinding` CR
+and creating new one.
+
 ```yaml
-apiVersion:
-kind: NetworkBinding
 metaData:
   name:
-  namespace:
-  finalizers: ["PortLink"]
+  ownerRef:
+  finalizers:
 spec:
-  portLinks:
-    - name:
-      namespace:
-    - name:
-      namespace:
-  networkConfiguration:
+  networkConfigurationRef:
     name:
     namespace:
+  ports:
+  - portID:
+    deviceRef:
+      name:
+      kind:
+      namespace:
+  - portID:
+    deviceRef:
+      name:
+      kind:
+      namespace:
 status:
-  # Currently applied network configuration, we need to record these configuration
-  # for deconfiguring the network because the networkConfiguration referred in `.spec`
-  # may be changed.
-  networkConfigurationCopy:
   state:
 ```
 
 #### NetworkBinding Controller
 
-* When NetworkBinding CR is created
-  * NetworkBinding Controller copies the networkConfiguration CR to the
-    `status.networkConfigurationCopy` field to start configuring the network.
-  * Instantiate a specific `PortManager` according to the kind of port in the ports
-    field of the `portLink` CR, and then call the `Configure()` method
-    corresponding to the `PortManager`.
-  * The `Configure()` method corresponding to `PorManager` will instantiate the
-    corresponding `DeviceManager`, and then call the `ConfigureNetwork()` method
-    corresponding to the `DeviceManager`.
-  * According to the length of portLinks, it is determined whether the configuration
-    of link aggregation is required. If it is greater than one, the
-    ConfigureLinkAggreation() method is called for configuration.
-  * After the configuration is complete, the configuration result will be
-    fed back to the `status.state` field.
-* When the NetworkBinding CR is deleted
-  * Determine whether link aggregation needs to be cancelled according to the length
-    of portLinks. If it is greater than one, call the `DeConfigureLinkAggreation()`
-    method.
-  * Call the `DeConfigure` method of the corresponding `Manager` to clear the
-    network configuration recorded in `networkBinding.status.networkConfigurationCopy`.
-  * Delete NetworkBinding CR
+Add the environment variable `ADMIN_NAMESPACE`, the NetworkBinding Controller
+judges whether the user has the authority to configure the port according to the
+content of `Device CR annotation`.
 
-#### CRD of some port instances
+* User creates `NetworkBinding` CR
+  * Instantiate the specific `DeviceManager` according to the `deviceRef`
+    information in the `.spec.ports` field, and then call the
+    `ConfigureNetwork()` method to modify the corresponding `Device` CR.
 
-##### NICPort
+* User deletes `NetworkBinding` CR
+  * Instantiate the specific `DeviceManager` according to the `deviceRef`
+    information in the `.spec.ports` field, and then call the
+    `DeConfigureNetwork()` method to modify the corresponding `Device` CR.
 
-```yaml
-kind: NICPort
-metaData:
-  name: bm0-eth0
-spec:
-  portLink:
-    name: pl1
-    namespace: def
-  capability:
-    speed: 1000
-    smartNIC: false
-```
-
-##### SwitchPort
-
-```yaml
-kind: SwitchPort
-metaData:
-  name: switch0-port0
-spec:
-  portLink:
-    name: pl1
-    namespace: def
-  device:
-    name: switch0
-    kind: SwitchDevice
-    namepsace: def
-```
-
-#### CRD of device instance
-
-##### Switch
+#### Switch
 
 ```yaml
 kind: Switch
 metaData:
   name: switch0
+  finalizers:
+  annotations:
+    adminOnlyPorts: "0/22,0/23,3/34-3/45"
+    reservedPorts: "0/1,0/2"
 spec:
-  specialNamespace: ["def", "abc"]
   os: fos
   ip: 192.168.0.1
   mac: ff:ff:ff:ff:ff:ff
-  # Users with different permissions use different accounts to log in to
-  # the device to operate.
-  account:
-    special:
-      username:
-      password:
-    normal:
-      username:
-      password:
+  secret:
   # Indicates the switch at the other end of the peer link with this switch.
-  peerLinks:
-    - name: switch0
-      namespace: def
+  peerLinkWith:
+  - name: switch1
+    namespace: def
+status:
+  ports:
+  - portID:
+    # Current network configuration applied to this port
+    networkConfiguration:
+    # Reference refer to desired networkConfiguration CR
+    networkConfigurationRef:
+      name:
+      namespace:
+    lagWith:
+    - portID:
+      deviceRef:
+        name:
+        kind:
+        namespace:
+    state:
 ```
+
+#### Switch Controller
+
+* Administrator creates `Switch` CR
+  * The Switch Controller checks whether the data entered by the user is legal,
+    and adds `finalizers`, then uses `Ansible` to obtain all port information
+    of the switch, and initializes all ports in `.status.ports`.
+
+* Administrator deletes `Switch` CR
+  * The Switch Controller detects whether the number of configured ports is 0.
+    If it is not 0, it is not allowed to delete the CR, otherwise delete the
+    `finalizers` and delete the CR. The controller determines whether a port is
+    configured by checking the port's `.networkConfiguration`. If this field is not
+    nil, the port is configured.
+
+* The NetworkBinding Controller modify `.status.ports`
+  * The Switch Controller judges whether the contents of `.status.ports.networkConfiguration`
+    are as same as the contents of `NetworkConfiguration` CR pointed to by
+    `.status.ports.networkConfigurationRef`. If they are not the same, perform the
+    next step, else judge whether the field of `.status.ports.state` is `Ready`.
+    If it is not Ready, proceed to the next step.
+  * The Switch Controller configures the port. If `.status.ports.networkConfigurationRef`
+    is empty, clear the configuration according to `.status.ports.networkConfiguration`.
+    If `.status.ports.networkConfigurationRef` is not empty, delete the port configuration
+    according to `.status.ports.networkConfiguration`, and then copy the contents
+    of `NetworkConfiguration` CR pointed to by `.status.ports.networkConfigurationRef`
+    to `.status.ports.networkConfiguration`. Then configure the port.
+  * The Switch Controller writes the operation instructions to be performed on the
+    switch into the `playbook.yml`, and then calls Ansible once in a while to execute
+    the `playbook.yml`.
 
 ### Implementation Details/Notes/Constraints
 
