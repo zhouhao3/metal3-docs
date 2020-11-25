@@ -131,8 +131,9 @@ created `NetworkBinding`s. If false, Match() will return nil and error. The
 func Match(client runtime.Client, refs []NetworkConfigurationRef, ports []Port)
                                      ([]*v1alpha1.NetworkBinding, error) {
 }
-
 ```
+
+NetworkConfigurationRef *NetworkConfigurationRef `json:"networkConfigurationRef,omitempty"`
 
 ```go
 type NetworkConfigurationRef struct {
@@ -273,21 +274,8 @@ Add the following methods in `metal3machine_manager.go`:
 metaData:
   name: nc1
   finalizers:
-  - m3m1
+    - m3m1
 spec:
-  VLANs:
-    - id:
-    - id:
-  untaggedVLAN:
-  trunk:
-  # Indicates whether link aggregation is required. If the value is true,
-  # select two ports for link aggregation.
-  linkAggregation: false
-  linkAggregationType: # LAG, MLAG
-  # Network card performance required for this network configuration
-  nicHint:
-    speed: 1000
-    smartNIC: false
   acl:
     - type: # ipv4, ipv6
       action: # allow, deny
@@ -296,6 +284,18 @@ spec:
       srcPortRange: # 22, 22-30
       des: # xxx.xxx.xxx.xxx/xx
       desPortRange: # 22, 22-30
+  trunk:
+  untaggedVLAN:
+  vlans:
+    - id:
+    - id:
+  # Indicates whether link aggregation is required. If the value isn't empty,
+  # select two ports for link aggregation.
+  linkAggregationType: # LAG, MLAG
+  # Network card performance required for this network configuration
+  nicHint:
+    speed: 1000
+    smartNIC: false
 status:
   networkBindingRefs:
     - name:
@@ -321,6 +321,9 @@ status:
     and creates a new one for each deleted `NetworkBinding` CR according to the
     contents in `.status.networkBindingRefs`.
 
+* User creates `NetworkBinding` CR
+  * The NetworkConfiguration Controller will watch `NetworkBinding` resource, when a `NetworkBinding` CR is created, the NetworkConfiguration Controller will add the `NetworkBinding`'s Ref to `.status.networkBindingRefs`
+
 #### NetworkBinding CRD
 
 `NetworkBinding` CR indicates a networkConfiguration is applied to some ports.
@@ -341,13 +344,9 @@ spec:
   networkConfigurationRef:
     name:
     namespace:
-  ports:
-  - portID:
-    deviceRef:
-      name:
-      kind:
-      namespace:
-  - portID:
+  port:
+    portID:
+    lagWith:
     deviceRef:
       name:
       kind:
@@ -389,24 +388,20 @@ spec:
   secret:
   # Indicates the switch at the other end of the peer link with this switch.
   peerLinkWith:
-  - name: switch1
-    namespace: def
+    - name: switch1
+      namespace: def
+  ports:
+    - portID:
+      lagWith:
+      # Reference refer to desired networkConfiguration CR
+      networkConfigurationRef:
+        name:
+        namespace:
 status:
   ports:
-  - portID:
-    # Current network configuration applied to this port
-    networkConfiguration:
-    # Reference refer to desired networkConfiguration CR
-    networkConfigurationRef:
-      name:
-      namespace:
-    lagWith:
     - portID:
-      deviceRef:
-        name:
-        kind:
-        namespace:
-    state:
+      lagWith:
+      state:
 ```
 
 #### Switch Controller
@@ -414,30 +409,21 @@ status:
 * Administrator creates `Switch` CR
   * The Switch Controller checks whether the data entered by the user is legal,
     and adds `finalizers`, then uses `Ansible` to obtain all port information
-    of the switch, and initializes all ports in `.status.ports`.
+    of the switch.
 
 * Administrator deletes `Switch` CR
-  * The Switch Controller detects whether the number of configured ports is 0.
+  * The Switch Controller detects whether the number of `.status.ports` is 0.
     If it is not 0, it is not allowed to delete the CR, otherwise delete the
-    `finalizers` and delete the CR. The controller determines whether a port is
-    configured by checking the port's `.networkConfiguration`. If this field is not
-    nil, the port is configured.
+    `finalizers` and delete the CR.
 
-* The NetworkBinding Controller modify `.status.ports`
-  * The Switch Controller judges whether the contents of `.status.ports.networkConfiguration`
-    are as same as the contents of `NetworkConfiguration` CR pointed to by
-    `.status.ports.networkConfigurationRef`. If they are not the same, perform the
-    next step, else judge whether the field of `.status.ports.state` is `Ready`.
-    If it is not Ready, proceed to the next step.
-  * The Switch Controller configures the port. If `.status.ports.networkConfigurationRef`
-    is empty, clear the configuration according to `.status.ports.networkConfiguration`.
-    If `.status.ports.networkConfigurationRef` is not empty, delete the port configuration
-    according to `.status.ports.networkConfiguration`, and then copy the contents
-    of `NetworkConfiguration` CR pointed to by `.status.ports.networkConfigurationRef`
-    to `.status.ports.networkConfiguration`. Then configure the port.
-  * The Switch Controller writes the operation instructions to be performed on the
-    switch into the `playbook.yml`, and then calls Ansible once in a while to execute
-    the `playbook.yml`.
+* The NetworkBinding Controller add new item to `.spec.ports`
+  * The Switch Controller compares whether the `.spec.ports` as same as `.status.ports`.
+    If different, The NetworkBinding Controller will configure network for the extra port in `.spec.port`.
+
+* The NetworkBinding Controller remove a item from `.spec.ports`
+  * The Switch Controller compares whether the `.spec.ports` as same as `.status.ports`.
+    If different, The NetworkBinding Controller will remove network for the extra port in
+     `.status.port` according to the port configuration in the switch.
 
 ### Implementation Details/Notes/Constraints
 
