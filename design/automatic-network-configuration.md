@@ -93,33 +93,56 @@ In the networkConfiguration operator, we abstract the following roles:
 
 #### Device
 
-Abstract all devices in the cluster (including various types of
-network devices and BMH).
+Abstract all devices in the cluster (such as Switch, SmartNic).
 
-```go
-// DeviceManager is used to control the `Device`
-type DeviceManager interface {
-    // ConfigurePort set the network configure to the port
-    ConfigurePort(ctx context.Context, configuration interface{},
-                                      port *v1alpha1.Port) error
-    // DeConfigurePort remove the network configure from the port
-    DeConfigurePort(ctx context.Context, port *v1alpha1.Port) error
-    // CheckPortConfigutation checks whether the configuration is
-    // configured on the port
-    CheckPortConfigutation(ctx context.Context, portID string) bool
-}
-```
-
-Each type of network device must have its own CRD and implements corresponding
-`DeviceManager` interface.
+Each type of network device must have its own CRD.
 
 ##### Port
 
 Indicates the specific port of the network device.
 
+```go
+// PortManager is used to control the `Port`
+type PortManager interface {
+    // ConfigurePort set the network configure to the port
+    ConfigurePort(ctx context.Context, configuration interface{}) error
+    // DeConfigurePort remove the network configure from the port
+    DeConfigurePort(ctx context.Context) error
+    // CheckConfigutation checks whether the configuration is
+    // configured on the port
+    CheckConfigutation(ctx context.Context) bool
+}
+```
+
+Each type of `Port` must have its own CRD and implements corresponding
+`PortManager` interface.
+
 #### Configuration
 
-Indicates the content of the specific configuration of each port, and each device needs to implement its own corresponding configuration.
+Indicates the content of the specific configuration of each port.
+Each type of `Configuration` must have its own CRD
+
+#### Port Controller
+
+Each `Device` must have its own `Port controller` to monitor the corresponding
+`Port`, and connect to `Device` to change the configuration of the
+corresponding port according to the `Port` change.Each Port controller must
+implement the method of configuring `Device` specified by the `Device.spec.protocol`.
+
+The following is the processing after `Port CR` changes:
+* Port.spec.configurationRef changed from empty to non-empty
+  * Find the corresponding `Device` CR according to `DeviceRef`, then verify that
+    the configuration of the port is allowed according to the information in the
+    device CR, and then log in to the corresponding device to perform the
+    corresponding configuration operation.
+
+* Port.spec.configurationRef changed from non-empty to empty
+  * Find the corresponding `Device` CR according to `DeviceRef`, and then log in
+    to the corresponding device to cancel the corresponding configuration.
+
+* Port.spec.configurationRef content changes
+  * Log in to the corresponding device and apply the latest configuration.
+
 ### Workflow
 
 Create CR related to BMH's network:
@@ -140,7 +163,7 @@ Create Metal3Machine:
   according to the original method.
 * Before provisioning, if the machine's network configuration field is not empty,
   CAPM3 calls the `configureNetwork()` method to fill networkConfiguration into
-  the appropriate `Port.spec.portConfigurationRef`.
+  the appropriate `spec.configurationRef`.
 * Port controller starts to configure the network by call device.ConfigurePort().
 * BMO detects that the Port CR corresponding to all its own network cards are
   configured and continues to provision BMH.
@@ -149,7 +172,7 @@ Remove Metal3Machine:
 
 * User deletes the `Metal3Machine` CR.
 * CAPM3 calls the `deconfigureNetwork()` to find all the `Port` CR corresponding
-  to the BMO network cards, and clear their `portConfigurationRef`.
+  to the BMO network cards, and clear their `spec.configurationRef`.
 * Port  controller starts to deconfigure the network by call device.DeConfigurePort().
 * BMO stage detects that the `Port` CR corresponding to all its own network
   cards are cleared after the configuration is completed and continues to
@@ -164,8 +187,8 @@ spec:
   // Specify the network configuration that metal3Machine needs to use
   networkConfiguration:
   // no smartNic
-  - ConfigurationRefs:
-    - name: nc1
+  - ConfigurationRef:
+      name: nc1
       kind: SwitchPortConfiguration
       namespace: default
     // Network card performance required for this network configuration
@@ -173,16 +196,10 @@ spec:
       name: eth0
       smartNIC: false
   // with smartNic
-  - ConfigurationRefs:
-    // configure for smartNic
-    - name: nc1
+  - ConfigurationRef:
+      name: nc1
       kind: SmartNicConfiguration
-      namespace: default
-    // configure for switchPort
-    - name: nc2
-      kind: SwitchPortConfiguration
-      namespace: default
-    // Network card performance required for this network configuration
+      namespace:  default
     nicHint:
       name: eth1
       smartNIC: true
@@ -197,9 +214,9 @@ and performance of all network cards in the `BareMetalHost`.
 spec:
   ports:
     - mac: 00:00:00:00:00:00
-      smartNIC: false
       portRef:
         name: port0
+        kind: SwitchPort
         namespace: default
    - mac:
    ......
@@ -229,24 +246,27 @@ Add the following methods in `metal3machine_manager.go`:
 
 ### Add new CRD and controller
 
-#### Port CRD
+#### Switch
 
-`Port` CR represents a specific port of a network device, including port information,
+The following is the realization of the switch, including the realization of the
+`Device`: `Switch`, `Port` realization: `SwitchPort`, `Configuration` realization:
+`SwitchConfiguration`, `Port controller` realization: `SwitchPort controller`.
+The following is the specific implementation:
+
+##### SwitchPort CRD
+
+`SwitchPort` CR represents a specific port of a network device, including port information,
 the performance of the network device to which it belongs, and the performance of
 the connected network card.
 
-Example 1: Normal BMH (without smartNic) connect Switch port
-
 ```yaml
 apiVersion: v1alpha1
-kind: Port
+kind: SwitchPort
 metaData:
   name: port0
   // Point to the Divice to which it belongs
   ownerRef:
     name: switch0
-    kind: Switch
-    namespace: default
   finalizers:
 spec:
   // Represents the port number on the devic to which it belongs
@@ -254,101 +274,17 @@ spec:
   // The configuration that needs to be configured on this port
   configurationRef:
     name: sc1
-    kind: SwitchPortConfiguration
     namespace: default
-  // Represents the next port information of this port link
-  nextRef:
-    name:
-    namespace: 
 status:
   // Indicates the actual configuration status of the port
   state: Configured
   // Indicates the configuration information currently applied to the port
   configurationRef:
     name: sc1
-    kind: SwitchPortConfiguration
     namespace: default
   .....
 ```
-
-Example 2: BMH (with smartNic) connect Switch port
-
-```yaml
-apiVersion: v1alpha1
-kind: Port
-metaData:
-  name: port2
-  ownerRef:
-    name: smart1
-    kind: SmartNic
-    namespace: default
-  finalizers:
-  - defaulf-bm0
-spec:
-  id: 0
-  portConfigurationRef:
-    name: sn1
-    kind: SmartNicConfiguration
-    namespace: default
-  nextPortRef:
-    name: port3
-    namespace: default
-status:
-  // Indicates the actual configuration status of the port
-  state: Configured
-  // Indicates the configuration information currently applied to the port
-  configurationRef:
-    name: sn1
-    kind: SmartNicConfiguration
-    namespace: default
-```
-
-```yaml
-apiVersion: v1alpha1
-kind: Port
-metaData:
-  name: port3
-  ownerRef:
-    name: switch0
-    kind: Switch
-    namespace: default
-  finalizers:
-spec:
-  portID: 3
-  portConfigurationRef:
-    name: sc2
-    kind: SwitchPortConfiguration
-    namespace: default
-  nextPortRef:
-    name: 
-    namespace:
-  smrtNic: true
-status:
-  // Indicates the actual configuration status of the port
-  state: Configured
-  // Indicates the configuration information currently applied to the port
-  configurationRef:
-    name: sw1
-    kind: SwitchPortConfiguration
-    namespace: default
-```
-
-#### Port Controller
-
-* networkConfigurationRef changed from empty to non-empty
-  * Find the corresponding `Device` CR according to `DeviceRef`, then verify that
-    the configuration of the port is allowed according to the information in the
-    device CR, and then log in to the corresponding device to perform the
-    corresponding configuration operation.
-
-* networkConfigurationRef changed from non-empty to empty
-  * Find the corresponding `Device` CR according to `DeviceRef`, and then log in
-    to the corresponding device to cancel the corresponding configuration.
-
-* networkConfigurationRef content changes
-  * Log in to the corresponding device and apply the latest configuration.
-
-#### SwitchPortConfiguration CRD
+##### SwitchPortConfiguration CRD
 
 ```yaml
 apiVersion: v1alpha1
@@ -370,13 +306,14 @@ spec:
       desPortRange: // 22, 22-30
   // Indicates which mode this port should be set to,  valid values are `access`, `trunk` or `hybrid`.
   type: accesss
+  untaggedVLAN: 1
   // Indicates which VLAN this port should be placed in.
   vlans:
     - id: 2
     - id: 3
 ```
 
-#### Switch
+##### Switch CRD
 
 ```yaml
 apiVersion: v1alpha1
@@ -385,6 +322,8 @@ metaData:
   name: switch0
   namespace: default
 spec:
+  // Indicates the configured protocol
+  protocol: ansible
   // The type of OS this switch runs
   os: fos
   // IP Address of the switch
@@ -394,14 +333,75 @@ spec:
   secret:
   // Restricted ports in the switch
   restrictedPorts:
-    - portID: 0
+    // portID
+    0:
       // True if this port is not available, false otherwise
       disabled: false
       // Indicates the range of VLANs allowed by this port in the switch
       vlanRange: 1, 6-10
       // True if this port can be used as a trunk port, false otherwise
       trunkDisable: false
-    - portID: 2
+    2:
+      ...
+```
+
+##### SwitchPort Controller
+
+Implement the following protocols to configure `Switch`:
+1. Ansible
+
+
+2. Snmp
+
+
+3. Netconf
+
+#### SmartNic
+
+##### SmartNicPort
+```yaml
+apiVersion: v1alpha1
+kind: SmartNicPort
+metaData:
+  name: port2
+  ownerRef:
+    name: smart1
+  finalizers:
+  - defaulf-bm0
+spec:
+  id: 0
+  configurationRef:
+    name: sn1
+    namespace: default
+  // Represents the next port information of this port link
+  nextPortRef:
+    name: port3
+    kind: SwitchPort
+    namespace: default
+status:
+  // Indicates the actual configuration status of the port
+  state: Configured
+  // Indicates the configuration information currently applied to the port
+  configurationRef:
+    name: sn1
+    namespace: default
+```
+##### SmartNicConfiguration CRD
+
+```yaml
+apiVersion: v1alpha1
+kind: SmartNicConfiguration
+metaData:
+  name: sc1
+  namespace: default
+  finalizers:
+    - default-port0
+spec:
+  ...
+  nextConfigurationRef:
+  name: sp1
+  kind: SwitchPortConfiguration
+  namespace: default
 ```
 
 ### Implementation Details/Notes/Constraints
@@ -440,4 +440,4 @@ NONE
 
 * [issue](https://github.com/metal3-io/baremetal-operator/issues/570)
 * [physical-network-api-prototype](https://github.com/metal3-io/metal3-docs/blob/master/design/physical-network-api-prototype.md)
-* [demo](https://github.com/Hellcatlk/networkconfiguration-operator)
+* [contracts](https://github.com/Hellcatlk/networkconfiguration-operator/docs)
