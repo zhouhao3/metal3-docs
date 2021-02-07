@@ -184,18 +184,18 @@ Remove Metal3Machine:
 
 ```yaml
 spec:
-  // Specify the network configuration that metal3Machine needs to use
+  # Specify the network configuration that metal3Machine needs to use
   networkConfiguration:
-  // no smartNic
+  # no smartNic
   - ConfigurationRef:
       name: nc1
       kind: SwitchPortConfiguration
       namespace: default
-    // Network card performance required for this network configuration
+    # Network card performance required for this network configuration
     nicHint:
       name: eth0
       smartNIC: false
-  // with smartNic
+  # with smartNic
   - ConfigurationRef:
       name: nc1
       kind: SmartNicConfiguration
@@ -264,25 +264,24 @@ apiVersion: v1alpha1
 kind: SwitchPort
 metaData:
   name: port0
-  // Point to the Divice to which it belongs
+  # Point to the Divice to which it belongs
   ownerRef:
     name: switch0
   finalizers:
 spec:
-  // Represents the port number on the devic to which it belongs
+  # Represents the port number on the devic to which it belongs
   id: 0
-  // The configuration that needs to be configured on this port
+  # The configuration that needs to be configured on this port
   configurationRef:
     name: sc1
     namespace: default
 status:
-  // Indicates the actual configuration status of the port
+  # Indicates the actual configuration status of the port
   state: Configured
-  // Indicates the configuration information currently applied to the port
+  # Indicates the configuration information currently applied to the port
   configurationRef:
     name: sc1
     namespace: default
-  .....
 ```
 ##### SwitchPortConfiguration CRD
 
@@ -295,19 +294,20 @@ metaData:
   finalizers:
     - default-port0
 spec:
-  // Represents the ACL rules implemented in the switch.
+  # Represents the ACL rules implemented in the switch.
   acl:
-    - type: // ipv4, ipv6
-      action: // allow, deny
-      protocol: // TCP, UDP, ICMP, ALL
-      src: // xxx.xxx.xxx.xxx/xx
-      srcPortRange: // 22, 22-30
-      des: // xxx.xxx.xxx.xxx/xx
-      desPortRange: // 22, 22-30
-  // Indicates which mode this port should be set to,  valid values are `access`, `trunk` or `hybrid`.
+    - type: # ipv4, ipv6
+      action: # allow, deny
+      protocol: # TCP, UDP, ICMP, ALL
+      src: # xxx.xxx.xxx.xxx/xx
+      srcPortRange: # 22, 22-30
+      des: # xxx.xxx.xxx.xxx/xx
+      desPortRange: # 22, 22-30
+  # Indicates which mode this port should be set to.
+  # Allowed values: access, trunk, hybrid
   type: accesss
   untaggedVLAN: 1
-  // Indicates which VLAN this port should be placed in.
+  # Indicates which VLAN this port should be placed in.
   vlans:
     - id: 2
     - id: 3
@@ -322,27 +322,112 @@ metaData:
   name: switch0
   namespace: default
 spec:
-  // Indicates the configured protocol
-  protocol: ansible
-  // The type of OS this switch runs
-  os: fos
-  // IP Address of the switch
-  ip: 192.168.0.1
-  // Port to use for SSH connection
-  port: 22
+  # Indicates the configured protocol, can't specify multiple protocol
+  # Allowed values: cli, snmp, netconf, ovs, openflow
+  protocol: cli
+  # SwitchConfiguration CR's name
+  configuration:
   secret:
-  // Restricted ports in the switch
+  # Restricted ports in the switch
   restrictedPorts:
-    // portID
-    0:
-      // True if this port is not available, false otherwise
+    <SwitchPort CR's name>:
+      portID: if 0/1
+      # True if this port is not available, false otherwise
       disabled: false
-      // Indicates the range of VLANs allowed by this port in the switch
+      # Indicates the range of VLANs allowed by this port in the switch
       vlanRange: 1, 6-10
-      // True if this port can be used as a trunk port, false otherwise
+      # True if this port can be used as a trunk port, false otherwise
       trunkDisable: false
-    2:
-      ...
+```
+
+##### SwitchConfiguration CRDs
+
+SwitchConfiguration CRDs include the login information of switch for different protocol in Switch CRD.
+
+CLISwitchConfiguration CRD
+```yaml
+apiVersion: v1alpha1
+kind: CLISwitchConfiguration
+metaData:
+  name: sc0
+  namespace: default
+spec:
+  # The type of OS this switch runs
+  os: fos
+  # The ip address of the switch
+  ip: 192.168.0.1
+  # The port to use for SSH connection
+  port: 22
+  # Login credentials of switch
+  secret:
+```
+
+SNMPSwitchConfiguration CRD
+```yaml
+apiVersion: v1alpha1
+kind: SNMPSwitchConfiguration
+metaData:
+  name: sc0
+  namespace: default
+spec:
+  mib:
+  # The ip address of the switch
+  ip: 192.168.0.1
+  # The port of SNMP
+  port: 161
+  # Login credentials of switch
+  secret:
+```
+
+NETConfSwitchConfiguration CRD
+```yaml
+apiVersion: v1alpha1
+kind: NETConfSwitchConfiguration
+metaData:
+  name: sc0
+  namespace: default
+spec:
+  # The ip address of switch
+  ip: 192.168.0.1
+  # The port of netconf client
+  port: 830
+  # The login credentials of switch
+  secret:
+```
+
+OVSSwitchConfiguration CRD
+```yaml
+apiVersion: v1alpha1
+kind: OVSSwitchConfiguration
+metaData:
+  name: sc0
+  namespace: default
+spec:
+  # The ip address of switch
+  ip: 192.168.0.1
+  # The port to use for SSH connection
+  port: 22
+  # The login credentials of switch
+  secret:
+```
+
+OpenflowSwitchConfiguration CRD
+```yaml
+apiVersion: v1alpha1
+kind: OpenflowSwitchConfiguration
+metaData:
+  name: sc0
+  namespace: default
+spec:
+  # The ip address of switch
+  ip: 192.168.0.1
+  # The port of openflow
+  port: 6633
+  # The version of openflow protocol
+  # Allow values: 1.0, 1.1, 1.2, 1.3
+  version: 1.3
+  # The login credentials of switch
+  secret:
 ```
 
 ##### SwitchPort Controller
@@ -373,15 +458,15 @@ spec:
   configurationRef:
     name: sn1
     namespace: default
-  // Represents the next port information of this port link
+  # Represents the next port information of this port link
   nextPortRef:
     name: port3
     kind: SwitchPort
     namespace: default
 status:
-  // Indicates the actual configuration status of the port
+  # Indicates the actual configuration status of the port
   state: Configured
-  // Indicates the configuration information currently applied to the port
+  # Indicates the configuration information currently applied to the port
   configurationRef:
     name: sn1
     namespace: default
