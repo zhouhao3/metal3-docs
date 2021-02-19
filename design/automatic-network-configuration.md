@@ -129,19 +129,39 @@ Each `Device` must have its own `Port controller` to monitor the corresponding
 corresponding port according to the `Port` change.Each Port controller must
 implement the method of configuring `Device` specified by the `Device.spec.protocol`.
 
-The following is the processing after `Port CR` changes:
-* Port.spec.configurationRef changed from empty to non-empty
-  * Find the corresponding `Device` CR according to `DeviceRef`, then verify that
-    the configuration of the port is allowed according to the information in the
-    device CR, and then log in to the corresponding device to perform the
-    corresponding configuration operation.
+#### State machine for the controller
 
-* Port.spec.configurationRef changed from non-empty to empty
-  * Find the corresponding `Device` CR according to `DeviceRef`, and then log in
-    to the corresponding device to cancel the corresponding configuration.
+Port controller sets 6 states for `Port.status.state`: `None`, `Created`, `Configuring`,
+`Configured`, `Deleting` and `Deleted`, each state has its own corresponding function.
 
-* Port.spec.configurationRef content changes
-  * Log in to the corresponding device and apply the latest configuration.
+* \<None\>
+  1. Indicates the status of the Port CR when it was first created, and the value
+     of `status.state` is nil.
+  2. The state handler will add finalizers to the Port CR to avoid being deleted,
+     and set the state of CR to `Created`
+* Created
+  1. Indicates waiting for spec.configurationRef to be assigned.
+  2. The state handler check spec.configurationRef's value, if isn't nil set the
+     state of CR to `Configuring`
+* Configuring
+  1. Indicates that the port is being configured.
+  2. The state handler configure port's network and check configuration progress.
+     If finished set the state of CR to `Configured` state
+* Configured
+  1. Indicates that the port configuration is complete.
+  2. The state handler check whether the target configuration is consistent with
+     the actual configuration, return to `Configuring` state and clean `status.configurationRef`
+     when inconsistent
+* Cleaning
+  1. Indicates that the port configuration is being cleared.
+  2. The state handler deconfigure port's network and check deconfiguration progress,
+     when finished clean `spec.configurationRef` and `status.configurationRef` then set
+     CR's state to `Cleaned` state.
+* Cleaned
+  1. Indicates that the port configuration has been cleared.
+  2. The state handler will remove finalizers, if `spec.configurationRef` isn't nil set CR's state to \<none\>
+
+![state.png](https://github.com/Hellcatlk/networkconfiguration-operator/blob/master/docs/state.png)
 
 ### Workflow
 
@@ -157,16 +177,17 @@ Create CR related to BMH's network:
 Create Metal3Machine:
 
 * User creates `Configuration` corresponding to the `Device`.
-* User specifies the `networkConfiguration` field when creating `Metal3Machine`
+* User specifies the `spec.networkConfiguration` field when creating `Metal3Machine`
   CR.
 * CAPM3 filter the BMH by calling the filter() function. Then select a BMH
   according to the original method.
-* Before provisioning, if the machine's network configuration field is not empty,
-  CAPM3 calls the `configureNetwork()` method to fill networkConfiguration into
-  the appropriate `spec.configurationRef`.
-* Port controller starts to configure the network by call device.ConfigurePort().
-* BMO detects that the Port CR corresponding to all its own network cards are
-  configured and continues to provision BMH.
+* Before provisioning, if the machine's `networkConfiguration` field is not empty,
+  CAPM3 will calls the `configureNetwork()` method to fill networkConfiguration into
+  the appropriate `Port.spec.configurationRef`.
+* The Port controller detects that `Port.spec.configurationRef` changes from empty
+  to non-empty, then carry out the corresponding processing.
+* BMO detects that the status.state of the Port CR corresponding to all BMH network
+  cards is empty or `Configured`, and then continues to provision BMH.
 
 Remove Metal3Machine:
 
@@ -174,9 +195,8 @@ Remove Metal3Machine:
 * CAPM3 calls the `deconfigureNetwork()` to find all the `Port` CR corresponding
   to the BMO network cards, and clear their `spec.configurationRef`.
 * Port  controller starts to deconfigure the network by call device.DeConfigurePort().
-* BMO stage detects that the `Port` CR corresponding to all its own network
-  cards are cleared after the configuration is completed and continues to
-  deprovision BMH.
+* BMO detects that the status.state of the Port CR corresponding to all BMH network
+  cards is empty or `Deleted`, and then continue to deprovision BMH.
 
 ### Changes to Current API
 
